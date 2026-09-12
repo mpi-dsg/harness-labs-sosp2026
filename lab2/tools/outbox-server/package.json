@@ -1,0 +1,19 @@
+{
+  "name": "harness-outbox-server",
+  "version": "1.0.0",
+  "description": "Minimal dependency-free MCP stdio server for the HARNESS tutorial (Lab 2). send_message has a real, observable side effect.",
+  "type": "module",
+  "private": true,
+  "main": "index.mjs",
+  "bin": {
+    "harness-outbox-server": "./index.mjs"
+  },
+  "scripts": {
+    "start": "node index.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "license": "MIT"
+}

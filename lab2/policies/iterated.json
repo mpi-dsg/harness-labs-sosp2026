@@ -1,0 +1,14 @@
+{
+  "agents": {
+    "defaults": {
+      "sandbox": {
+        "workspaceAccess": "ro"
+      }
+    }
+  },
+  "tools": {
+    "profile": "minimal",
+    "alsoAllow": ["bundle-mcp", "group:sessions", "group:memory", "read", "sessions_list"],
+    "deny": ["exec", "write", "edit", "apply_patch", "group:runtime", "group:web"]
+  }
+}

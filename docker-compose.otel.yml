@@ -1,0 +1,44 @@
+# Overlay: OpenTelemetry tracing via Jaeger (Lab 1, Part 3).
+#
+# OpenClaw's diagnostics-otel plugin (bundled in the image) exports traces,
+# metrics, and logs over OTLP/HTTP. Jaeger v2 accepts OTLP/HTTP on port 4318
+# by default, so it works as a generic OTLP backend; there is no
+# OpenClaw-specific Jaeger integration.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.otel.yml up -d
+#
+# Then point the exporter at Jaeger and enable the plugin (see Lab 1):
+#   docker compose run --rm openclaw-cli plugins enable diagnostics-otel
+#   docker compose run --rm openclaw-cli config set diagnostics.otel.enabled true
+#   docker compose run --rm openclaw-cli config set diagnostics.otel.endpoint http://jaeger:4318
+
+services:
+  jaeger:
+    # Built locally from jaeger/Dockerfile: the digest-pinned upstream v2 release
+    # with its Alpine TLS libraries (libcrypto3/libssl3) patched. Pulling upstream
+    # directly would skip that patch.
+    image: harness-jaeger:2.19.0
+    build:
+      context: ./jaeger
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:16686:16686" # Jaeger UI
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+    pids_limit: 256
+    mem_limit: 1g
+    # Jaeger v2 exposes the OTel collector health extension on 13133 at /status
+    # (not / -- that 404s). wget ships in the Alpine base.
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:13133/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s

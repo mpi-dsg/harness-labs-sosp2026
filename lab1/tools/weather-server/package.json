@@ -1,0 +1,50 @@
+{
+  "name": "harness-weather-server",
+  "version": "1.0.0",
+  "description": "Minimal MCP stdio server for the HARNESS tutorial (Lab 1). Returns canned weather data; makes no network calls.",
+  "type": "module",
+  "private": true,
+  "main": "index.bundle.mjs",
+  "bin": {
+    "harness-weather-server": "./index.bundle.mjs"
+  },
+  "files": [
+    "index.bundle.mjs",
+    "THIRD_PARTY_NOTICES.txt"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:check": "node scripts/build.mjs --check",
+    "start": "node index.bundle.mjs",
+    "test": "node --test",
+    "test:coverage": "c8 node --test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "c8": "11.0.0",
+    "esbuild": "0.28.1"
+  },
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "license": "MIT",
+  "c8": {
+    "all": true,
+    "include": [
+      "index.js"
+    ],
+    "exclude": [
+      "index.bundle.mjs",
+      "scripts/**",
+      "test/**"
+    ],
+    "check-coverage": true,
+    "branches": 80,
+    "functions": 80,
+    "lines": 80,
+    "statements": 80
+  }
+}

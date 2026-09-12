@@ -1,0 +1,160 @@
+name: harness-labs
+
+x-default-logging: &default-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# HARNESS tutorial lab stack (SOSP 2026).
+# Base stack: OpenClaw gateway + CLI. No cloud API keys.
+#
+# The model runs in Ollama ON THE HOST (installed by preflight.sh), reached at
+# http://host.docker.internal:11434. Containerized Ollama has no GPU access on
+# macOS (no Metal passthrough; ~25 tok/s CPU prefill against an ~11k-token
+# agent prompt), so it is only an opt-in profile for Linux hosts with GPUs:
+#   docker compose --profile container-ollama up -d
+#
+# Overlays:
+#   docker-compose.otel.yml     adds Jaeger for Lab 1 Part 3 (tracing)
+#   docker-compose.sandbox.yml  adds Docker socket access for Lab 2 Part 2 (sandbox)
+#
+# Lab state lives in ./state (NOT ~/.openclaw), so the labs never touch a
+# personal OpenClaw install on the same machine.
+
+services:
+  openclaw-gateway:
+    image: harness-openclaw:2026.7.1
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        OPENCLAW_BASE_IMAGE: docker.io/openclaw/openclaw:2026.7.1@sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
+    environment:
+      HOME: /home/node
+      OPENCLAW_HOME: /home/node
+      # Pin container-side paths so host paths cannot leak in via .env.
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?missing .env -- run ./preflight.sh first}
+      OPENCLAW_DISABLE_BONJOUR: "1"
+      TZ: UTC
+    volumes:
+      - ./state:/home/node/.openclaw
+      - ./lab1/tools:/home/node/.openclaw/workspace/tools:ro
+      - ./lab2/tools:/home/node/.openclaw/workspace/lab2-tools:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+    pids_limit: 512
+    mem_limit: ${OPENCLAW_GATEWAY_MEMORY_LIMIT:-2g}
+    cpus: ${OPENCLAW_GATEWAY_CPUS:-2.0}
+    logging: *default-logging
+    ports:
+      - "127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+    init: true
+    restart: unless-stopped
+    command:
+      [
+        "node",
+        "dist/index.js",
+        "gateway",
+        "--allow-unconfigured",
+        "--bind",
+        "lan",
+        "--port",
+        "18789",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # Reach host-side Ollama on Linux Docker Engine too (Docker Desktop
+    # provides this alias natively).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  openclaw-cli:
+    image: harness-openclaw:2026.7.1
+    profiles: ["cli"]
+    network_mode: "service:openclaw-gateway"
+    environment:
+      HOME: /home/node
+      OPENCLAW_HOME: /home/node
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:?missing .env -- run ./preflight.sh first}
+      BROWSER: echo
+      TZ: UTC
+    volumes:
+      - ./state:/home/node/.openclaw
+      - ./lab1/tools:/home/node/.openclaw/workspace/tools:ro
+      - ./lab2/tools:/home/node/.openclaw/workspace/lab2-tools:ro
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+    pids_limit: 256
+    mem_limit: ${OPENCLAW_CLI_MEMORY_LIMIT:-1g}
+    cpus: ${OPENCLAW_CLI_CPUS:-1.0}
+    logging: *default-logging
+    stdin_open: true
+    tty: true
+    init: true
+    entrypoint: ["node", "dist/index.js"]
+    depends_on:
+      openclaw-gateway:
+        condition: service_healthy
+
+  # Opt-in only (docker compose --profile container-ollama up -d): CPU-only on
+  # macOS/Windows. Prefer host-native Ollama; see preflight.sh.
+  ollama:
+    image: docker.io/ollama/ollama:0.32.0@sha256:57f573b47f1f71ebb445789f279fe3e596a8beab182f7cf486db9205bad87c5a
+    profiles: ["container-ollama"]
+    environment:
+      # Disable Ollama's cloud integrations; the tutorial is local-only.
+      OLLAMA_NO_CLOUD: "true"
+      # OpenClaw's agent prompt is ~11-13k tokens; the 4k default truncates it.
+      OLLAMA_CONTEXT_LENGTH: "16384"
+    volumes:
+      - ollama-models:/root/.ollama
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=1g
+    pids_limit: 512
+    mem_limit: ${OLLAMA_MEMORY_LIMIT:-6g}
+    cpus: ${OLLAMA_CPUS:-4.0}
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  ollama-models:

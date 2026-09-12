@@ -1,0 +1,26 @@
+{
+  "agents": {
+    "defaults": {
+      "sandbox": {
+        "mode": "all",
+        "scope": "session",
+        "workspaceAccess": "none",
+        "docker": {
+          "image": "openclaw-sandbox:bookworm-slim",
+          "network": "none",
+          "readOnlyRoot": true,
+          "memory": "512m",
+          "cpus": 0.5,
+          "pidsLimit": 128
+        }
+      }
+    }
+  },
+  "tools": {
+    "sandbox": {
+      "tools": {
+        "alsoAllow": ["bundle-mcp"]
+      }
+    }
+  }
+}

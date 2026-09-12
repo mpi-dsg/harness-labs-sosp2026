@@ -1,0 +1,7 @@
+{
+  "tools": {
+    "profile": "minimal",
+    "alsoAllow": ["bundle-mcp", "group:sessions", "group:memory"],
+    "deny": ["group:runtime", "group:fs", "group:web"]
+  }
+}

@@ -1,0 +1,57 @@
+# Overlay: sandbox isolation (Lab 2, Part 2).
+#
+# OpenClaw's Docker sandbox backend spawns one container per session for tool
+# execution. Inside our gateway container that requires the Docker CLI (baked
+# into harness-openclaw via Dockerfile) plus access to the host Docker socket.
+#
+# Security note: the socket grants control over the host Docker daemon. That
+# is acceptable for a local lab; in production use a socket proxy that
+# restricts API calls.
+#
+# PATH ALIGNMENT -- why HARNESS_STATE_DIR exists.
+#
+# The sandbox backend asks the HOST daemon to create a sibling container, and it
+# names the bind-mount source with its own state path. When the gateway itself
+# runs in a container, that path does not exist on the host, and Docker Desktop
+# refuses the whole run:
+#
+#   mounts denied: The path /home/node/.openclaw/sandboxes/agent-main-... is not
+#   shared from the host and is not known to Docker.
+#
+# The runtime has no host-path mapping option, so we make the two paths the same:
+# the state directory is bind-mounted at its real host path, and the OpenClaw
+# path variables point there instead of at /home/node/.openclaw. preflight.sh
+# writes HARNESS_STATE_DIR into .env as an absolute host path.
+#
+# This overlay therefore REPLACES the base file's container-side path pinning,
+# and only while sandboxing is on.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.sandbox.yml up -d
+#
+# Then keep both files for every later command in the lab:
+#   export COMPOSE_FILE=docker-compose.yml:docker-compose.sandbox.yml
+
+services:
+  openclaw-gateway:
+    environment:
+      OPENCLAW_STATE_DIR: ${HARNESS_STATE_DIR:?missing .env -- run ./preflight.sh first}
+      OPENCLAW_CONFIG_PATH: ${HARNESS_STATE_DIR}/openclaw.json
+      OPENCLAW_CONFIG_DIR: ${HARNESS_STATE_DIR}
+      OPENCLAW_WORKSPACE_DIR: ${HARNESS_STATE_DIR}/workspace
+    volumes:
+      - ${HARNESS_STATE_DIR}:${HARNESS_STATE_DIR}
+      - type: bind
+        source: ${DOCKER_SOCKET_PATH:?missing .env -- run ./preflight.sh first}
+        target: /var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:?missing .env -- run ./preflight.sh first}"
+
+  openclaw-cli:
+    environment:
+      OPENCLAW_STATE_DIR: ${HARNESS_STATE_DIR:?missing .env -- run ./preflight.sh first}
+      OPENCLAW_CONFIG_PATH: ${HARNESS_STATE_DIR}/openclaw.json
+      OPENCLAW_CONFIG_DIR: ${HARNESS_STATE_DIR}
+      OPENCLAW_WORKSPACE_DIR: ${HARNESS_STATE_DIR}/workspace
+    volumes:
+      - ${HARNESS_STATE_DIR}:${HARNESS_STATE_DIR}
