@@ -336,18 +336,34 @@ check_state_writable() {
   # different UID creates state/ that the container cannot write, and the
   # failure surfaces much later as an unexplained gateway error. On macOS the
   # Docker VM maps ownership, so this passes; it is here for the Linux path.
-  local probe
-  probe="state/.write-probe-$$"
-  if docker run --rm -u 1000:1000 -v "$PWD/state:/probe" \
+  # This probe is a convenience, never a blocker. It shells out to `docker run`,
+  # which fails for environment reasons that have nothing to do with the labs:
+  # Git Bash on Windows reports "provided file is not a console", MSYS rewrites
+  # the bind-mount path, and some setups refuse a TTY outright. An attendee hit
+  # exactly that during the tutorial. Distinguish "the probe could not run" from
+  # "the container genuinely cannot write", and only warn either way.
+  case "$(uname -s)" in
+    Darwin) ok "state/ ownership is mapped by the Docker VM (macOS)"; return 0 ;;
+  esac
+
+  local probe_out probe_status
+  probe_out=$(docker run --rm -u 1000:1000 -v "$PWD/state:/probe" \
        --entrypoint sh harness-openclaw:2026.7.1 \
-       -c "touch /probe/$(basename "$probe") && rm -f /probe/$(basename "$probe")" >/dev/null 2>&1; then
+       -c 'touch /probe/.write-probe && rm -f /probe/.write-probe' 2>&1 </dev/null)
+  probe_status=$?
+
+  if [ "$probe_status" -eq 0 ]; then
     ok "container can write to state/"
+  elif printf '%s' "$probe_out" | grep -qiE "not a console|not a tty|cannot enable tty|the system cannot find"; then
+    warn "could not run the state/ write probe in this shell; skipping it"
+    echo "  Docker refused a terminal here, which is a shell quirk and not a lab"
+    echo "  problem. On Windows, run the labs from PowerShell or WSL2 rather than"
+    echo "  Git Bash. Continuing."
   else
-    fail "the container cannot write to state/ (host UID $(id -u) vs container UID 1000)"
-    echo "  Every lab writes here, so this blocks the whole session."
-    echo "  Fix it with:  sudo chown -R 1000:1000 state"
-    echo "  This is a Linux issue; macOS maps ownership through the Docker VM."
-    return 1
+    warn "the container may not be able to write to state/ (host UID $(id -u) vs container UID 1000)"
+    echo "  If the gateway later fails to write state, fix it with:"
+    echo "    sudo chown -R 1000:1000 state"
+    echo "  This affects Linux hosts; macOS maps ownership through the Docker VM."
   fi
 }
 
@@ -430,18 +446,28 @@ setup_host_ollama() {
     # host.docker.internal to it, and that forward drops when the machine
     # changes network. Catch it here rather than inside a lab step.
     if docker image inspect harness-openclaw:2026.7.1 >/dev/null 2>&1; then
-      if docker run --rm --add-host host.docker.internal:host-gateway \
+      # </dev/null so Docker never tries to attach a terminal: Git Bash on
+      # Windows answers "provided file is not a console" and the probe dies for
+      # reasons unrelated to reachability. A probe that cannot run is a warning,
+      # never a failure.
+      reach_out=$(docker run --rm --add-host host.docker.internal:host-gateway \
            --entrypoint curl harness-openclaw:2026.7.1 \
-           -fsS -m 6 http://host.docker.internal:11434/api/version >/dev/null 2>&1; then
+           -fsS -m 6 http://host.docker.internal:11434/api/version 2>&1 </dev/null)
+      reach_status=$?
+      if [ "$reach_status" -eq 0 ]; then
         ok "Ollama reachable from a container"
+      elif printf '%s' "$reach_out" | grep -qiE "not a console|not a tty|cannot enable tty"; then
+        warn "could not run the container reachability probe in this shell; skipping it"
+        echo "  Docker refused a terminal here. On Windows, use PowerShell or WSL2"
+        echo "  rather than Git Bash. Continuing."
       else
-        fail "Ollama is up on the host but unreachable from a container"
-        echo "  Docker Desktop's route to the host has dropped. This happens"
-        echo "  right after the machine changes network, and it is not a model,"
-        echo "  policy, or lab problem. Fix it with, cheapest first:"
+        warn "Ollama is up on the host but a container could not reach it"
+        echo "  Docker's route to the host has dropped. This happens right after"
+        echo "  the machine changes network, and it is not a model, policy, or lab"
+        echo "  problem. Fix it with, cheapest first:"
         echo "    1. docker compose down && docker compose up -d --wait openclaw-gateway"
         echo "    2. Restart Docker Desktop, then re-run ./preflight.sh"
-        return 1
+        echo "  On Linux, Ollama must bind the bridge: OLLAMA_HOST=0.0.0.0:11434 ollama serve"
       fi
     fi
     warn "if you started it yourself, make sure OLLAMA_CONTEXT_LENGTH=16384 is set (OpenClaw prompts exceed the 4k default)"
@@ -571,7 +597,7 @@ main() {
   echo
   echo "Next: follow Lab 1. Quick smoke test:"
   echo "  docker compose up -d --wait"
-  echo "  curl -fsS http://127.0.0.1:18789/healthz && echo ' gateway OK'"
+  echo "  curl -fsS \"http://127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}/healthz\" && echo ' gateway OK'"
 }
 
 main "$@"
