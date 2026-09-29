@@ -43,7 +43,7 @@ preserved.
 
 ```sh
 docker compose up -d --wait --wait-timeout 120
-curl -fsS http://127.0.0.1:18789/healthz && echo ' gateway OK'
+curl -fsS "http://127.0.0.1:${OPENCLAW_GATEWAY_PORT:-18789}/healthz" && echo ' gateway OK'
 ```
 
 Lab instructions: [Lab 1](https://harness.mpi-dsg.org/materials/lab1) · [Lab 2](https://harness.mpi-dsg.org/materials/lab2)
