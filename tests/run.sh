@@ -19,7 +19,14 @@ node --test lab2/tools/outbox-server/test/server.test.js
 
 npm --prefix lab1/tools/weather-server run build:check
 npm --prefix lab1/tools/weather-server run test:coverage
-npm --prefix lab1/tools/weather-server audit
-npm --prefix lab1/tools/weather-server audit signatures
+# The advisory and signature checks query the npm registry. Skip them when it is
+# unreachable so the gate still runs on a plane or in a conference room; set
+# HARNESS_OFFLINE=1 to skip them deliberately.
+if [ "${HARNESS_OFFLINE:-0}" = "1" ] || ! npm ping >/dev/null 2>&1; then
+  printf 'SKIP: npm audit (registry unreachable or HARNESS_OFFLINE=1)\n'
+else
+  npm --prefix lab1/tools/weather-server audit
+  npm --prefix lab1/tools/weather-server audit signatures
+fi
 
 printf 'all tests passed\n'

@@ -276,6 +276,81 @@ neutralize_docker_credential_helper() {
   fi
 }
 
+set_env_var() {
+  local key="$1" value="$2" tmp
+  tmp=$(mktemp)
+  if [ -f .env ] && grep -q "^${key}=" .env; then
+    awk -v k="$key" -v v="$value" -F= '$1 == k { print k "=" v; next } { print }' .env > "$tmp"
+  else
+    [ -f .env ] && cat .env > "$tmp"
+    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+  fi
+  mv "$tmp" .env
+  chmod 600 .env
+}
+
+check_gateway_port() {
+  # The gateway publishes on 127.0.0.1:18789. Anyone already running OpenClaw --
+  # or clawdbot, or a previous lab project left up -- is holding that port, and
+  # Docker's error names neither the cause nor the fix:
+  #   Error response from daemon: ports are not available: ... bind: address already in use
+  # Found on a machine with a native gateway running since the day before.
+  local port want
+  # Tests that are not about ports set this, so the suite does not depend on
+  # whatever happens to be listening on the machine running it.
+  if [ "${HARNESS_SKIP_PORT_CHECK:-0}" = "1" ]; then
+    return 0
+  fi
+  want="${OPENCLAW_GATEWAY_PORT:-$(awk -F= '$1 == "OPENCLAW_GATEWAY_PORT" { print $2 }' .env 2>/dev/null)}"
+  want="${want:-18789}"
+  if ! lsof -nP -iTCP:"$want" -sTCP:LISTEN >/dev/null 2>&1; then
+    ok "gateway port $want is free"
+    return 0
+  fi
+  # Our own gateway holding the port is not a collision. Without this, every
+  # re-run sees the gateway it started last time, moves up one, and the port
+  # ratchets away across a morning: 18789, 18790, 18791, and so on.
+  if docker compose ps --format '{{.Name}} {{.Ports}}' 2>/dev/null \
+       | grep -q "openclaw-gateway.*127\.0\.0\.1:${want}->"; then
+    ok "gateway port $want is held by this project's own gateway"
+    return 0
+  fi
+  # Occupied. Offer the first free port above it rather than just complaining.
+  for port in $(seq $((want + 1)) $((want + 20))); do
+    if ! lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+      warn "port $want is already in use; using $port instead"
+      echo "  Something is already listening on 127.0.0.1:$want:"
+      lsof -nP -iTCP:"$want" -sTCP:LISTEN 2>/dev/null | awk 'NR<=2 {print "    " $0}'
+      echo "  Leaving it alone and writing OPENCLAW_GATEWAY_PORT=$port to .env."
+      echo "  Every lab command reads that value, so nothing else changes."
+      set_env_var OPENCLAW_GATEWAY_PORT "$port"
+      return 0
+    fi
+  done
+  fail "ports $want-$((want + 20)) are all in use; free one and re-run"
+  return 1
+}
+
+check_state_writable() {
+  # The container runs as UID 1000 (`USER node`). On Linux a host user with a
+  # different UID creates state/ that the container cannot write, and the
+  # failure surfaces much later as an unexplained gateway error. On macOS the
+  # Docker VM maps ownership, so this passes; it is here for the Linux path.
+  local probe
+  probe="state/.write-probe-$$"
+  if docker run --rm -u 1000:1000 -v "$PWD/state:/probe" \
+       --entrypoint sh harness-openclaw:2026.7.1 \
+       -c "touch /probe/$(basename "$probe") && rm -f /probe/$(basename "$probe")" >/dev/null 2>&1; then
+    ok "container can write to state/"
+  else
+    fail "the container cannot write to state/ (host UID $(id -u) vs container UID 1000)"
+    echo "  Every lab writes here, so this blocks the whole session."
+    echo "  Fix it with:  sudo chown -R 1000:1000 state"
+    echo "  This is a Linux issue; macOS maps ownership through the Docker VM."
+    return 1
+  fi
+}
+
 pull_images() {
   echo
   echo "-- Pull images (this is the slow part; do it at home)"
@@ -287,18 +362,61 @@ pull_images() {
     images+=("$OLLAMA_IMAGE")
   fi
   for image in "${images[@]}"; do
-    docker pull "$image" >/dev/null
-    ok "pulled $image"
+    # Already-present images are not re-pulled. A digest-pinned `docker pull`
+    # still contacts the registry, so an unconditional pull turns a fully cached
+    # machine into a failure the moment it is offline -- which is exactly the
+    # state of a conference room, and of a rehearsal on a plane.
+    if docker image inspect "$image" >/dev/null 2>&1; then
+      ok "already present $image"
+      continue
+    fi
+    if docker pull "$image" >/dev/null 2>&1; then
+      ok "pulled $image"
+    else
+      fail "could not pull $image and it is not cached locally (offline?)"
+      return 1
+    fi
   done
 }
 
 build_images() {
   echo
   echo "-- Build local images"
-  docker compose build --pull openclaw-gateway >/dev/null
+  # --pull refreshes the base image, which needs the registry. Use it only when
+  # we can reach one; otherwise build from what is cached.
+  local pull_flag=--pull
+  if [ "${HARNESS_OFFLINE:-0}" = "1" ] || ! docker pull -q "$OPENCLAW_IMAGE" >/dev/null 2>&1; then
+    pull_flag=""
+    warn "building from cached base images (no registry reachable)"
+  fi
+  docker compose build ${pull_flag:+$pull_flag} openclaw-gateway >/dev/null
   ok "built harness-openclaw (gateway + Docker CLI)"
-  docker build --pull -q -t openclaw-sandbox:bookworm-slim sandbox/ >/dev/null
+  # A rebuild needs the network even with every base image cached: the apt-get /
+  # npm layer misses BuildKit's cache. If the image is already here and we are
+  # offline, keep it rather than fail.
+  if docker image inspect openclaw-sandbox:bookworm-slim >/dev/null 2>&1 && [ -z "$pull_flag" ]; then
+    echo "  openclaw-sandbox:bookworm-slim already built; keeping it"
+  else
+  docker build ${pull_flag:+$pull_flag} -q -t openclaw-sandbox:bookworm-slim sandbox/ >/dev/null
+  fi
   ok "built openclaw-sandbox:bookworm-slim"
+
+  # Jaeger is for Lab 1 Part 3.3, which is optional. Build it here so the lab
+  # never triggers an image build mid-session: its Dockerfile runs `apk upgrade`
+  # and therefore needs the network, which the conference is the worst place to
+  # discover. A failure here is not fatal. Tracing is the only thing it costs,
+  # and the lab says how to skip it.
+  if docker image inspect harness-jaeger:2.19.0 >/dev/null 2>&1; then
+    ok "harness-jaeger:2.19.0 already built (tracing available)"
+  elif docker compose -f docker-compose.yml -f docker-compose.otel.yml \
+         build jaeger >/dev/null 2>&1; then
+    ok "built harness-jaeger:2.19.0 (tracing available)"
+  else
+    warn "could not build the Jaeger image; tracing will be unavailable"
+    echo "  Lab 1 Part 3.3 is the only step that uses it, and it is optional."
+    echo "  Everything else runs without it. Re-run this script on a network"
+    echo "  that can reach the Alpine package mirror to enable tracing."
+  fi
 }
 
 setup_host_ollama() {
@@ -307,6 +425,25 @@ setup_host_ollama() {
 
   if curl -fsS -m 3 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
     ok "Ollama is serving on 127.0.0.1:11434"
+    # And, separately, that a container can reach it. These are different
+    # questions: Ollama binds 127.0.0.1 and Docker Desktop forwards
+    # host.docker.internal to it, and that forward drops when the machine
+    # changes network. Catch it here rather than inside a lab step.
+    if docker image inspect harness-openclaw:2026.7.1 >/dev/null 2>&1; then
+      if docker run --rm --add-host host.docker.internal:host-gateway \
+           --entrypoint curl harness-openclaw:2026.7.1 \
+           -fsS -m 6 http://host.docker.internal:11434/api/version >/dev/null 2>&1; then
+        ok "Ollama reachable from a container"
+      else
+        fail "Ollama is up on the host but unreachable from a container"
+        echo "  Docker Desktop's route to the host has dropped. This happens"
+        echo "  right after the machine changes network, and it is not a model,"
+        echo "  policy, or lab problem. Fix it with, cheapest first:"
+        echo "    1. docker compose down && docker compose up -d --wait openclaw-gateway"
+        echo "    2. Restart Docker Desktop, then re-run ./preflight.sh"
+        return 1
+      fi
+    fi
     warn "if you started it yourself, make sure OLLAMA_CONTEXT_LENGTH=16384 is set (OpenClaw prompts exceed the 4k default)"
     return 0
   fi
@@ -385,7 +522,34 @@ main() {
 
   check_environment
   if [ "$MODE" = check ]; then
+    # The 08:45 door check. It used to return here, having verified only Docker,
+    # git, curl, the socket, disk, and memory -- so a laptop that was set up at
+    # home and then rebooted passed cleanly while Ollama was dead, which is
+    # runbook signatures 1, 7, and 8. Check the things that actually go missing.
     echo
+    echo "-- Check the parts that do not survive a reboot"
+    if curl -fsS -m 3 http://127.0.0.1:11434/api/version >/dev/null 2>&1; then
+      ok "Ollama is serving on 127.0.0.1:11434"
+      if ollama list 2>/dev/null | grep -q "^${HARNESS_MODEL%%:*}"; then
+        ok "model $HARNESS_MODEL present"
+      else
+        fail "model $HARNESS_MODEL is missing; run ./preflight.sh without --check-only"
+      fi
+    else
+      fail "Ollama is not serving; re-run ./preflight.sh (it does not survive a reboot)"
+    fi
+    for image in harness-openclaw:2026.7.1 openclaw-sandbox:bookworm-slim; do
+      if docker image inspect "$image" >/dev/null 2>&1; then
+        ok "image $image present"
+      else
+        fail "image $image is missing; run ./preflight.sh without --check-only"
+      fi
+    done
+    echo
+    if [ "${FAILED:-0}" = "1" ]; then
+      echo "Check-only found problems. Run ./preflight.sh to fix them."
+      return 1
+    fi
     echo "Environment looks good (check-only mode; nothing changed)."
     return
   fi
@@ -393,9 +557,12 @@ main() {
   echo
   echo "-- Generate .env"
   write_environment_file
+  check_gateway_port
   prepare_state
   pull_images
   build_images
+  # After build_images: the probe runs the gateway image, so it must exist.
+  check_state_writable
   setup_host_ollama
   download_model
 

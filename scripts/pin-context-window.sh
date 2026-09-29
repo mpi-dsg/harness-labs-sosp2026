@@ -11,22 +11,28 @@
 # 42 GB, most of it spilled to CPU, on a machine this tutorial says needs 8 GB.
 # It does not error. It swaps, times out, retries, and looks like a hang.
 #
-# This pins num_ctx ONLY, and deliberately leaves contextWindow alone.
+# Pins num_ctx ONLY, and deliberately leaves contextWindow alone. Measured the
+# hard way: pinning both breaks every call.
 #
-# They are different things. num_ctx is what Ollama allocates -- the 42 GB. But
-# contextWindow is OpenClaw's own prompt budget, and shrinking it to 16384 makes
-# every call fail before it is sent: measured on this runtime, the agent prompt
-# is ~8,800 tokens and OpenClaw reserves a further 8,384 for the response, so a
-# 16,384 window leaves 8,000 for a prompt that needs 8,778 and the precheck
-# refuses with "Context overflow: prompt too large".
+# num_ctx is what Ollama allocates, and it is the number that matters for memory:
+# 16384 loads qwen3:4b in 5.1 GB, 32768 in 7.6 GB, and the model maximum of
+# 262144 extrapolates to about 42 GB, mostly spilled to CPU.
 #
-# Leaving contextWindow high and num_ctx at 16384 is the combination the labs
-# were verified against: Ollama loads 5.1 GB, and the ~8.8k prompt fits inside
-# 16,384 with room to spare, so nothing is ever truncated in practice.
+# contextWindow is a different thing: OpenClaw's own prompt budget. Do NOT pin it
+# down to match. The runtime floors the usable prompt budget at 8,000 tokens
+# (MIN_PROMPT_BUDGET_TOKENS) and derives the reserve as contextWindow minus that
+# floor, so a small contextWindow yields a budget of exactly 8,000 no matter what
+# else is configured. The agent prompt measures ~8,600 tokens, so every call then
+# fails the overflow precheck before it is sent. Verified against 16384, 20480,
+# and 24576, with agents.defaults.compaction.reserveTokens lowered and the
+# gateway restarted: the budget stayed at 8,000 in all of them.
 #
-# Consequence worth knowing: `doctor --fix` copies contextWindow back into
-# num_ctx, so re-run this script after any `doctor --fix`. scripts/e2e-lab2.sh
-# asserts the pin held.
+# The large contextWindow that onboarding writes is therefore load-bearing, and
+# the working combination is exactly: contextWindow left alone, num_ctx pinned.
+#
+# Consequence: `doctor --fix` copies contextWindow back into num_ctx and undoes
+# this. Re-run this script after any `doctor --fix`; scripts/e2e-lab2.sh checks
+# that the pin still holds and tells you when it does not.
 #
 # 16384 is safe but tight, and the tightness is not obvious. Measured on this
 # runtime: the agent prompt is ~8,800 tokens and OpenClaw reserves 8,384 more

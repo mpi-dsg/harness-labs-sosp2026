@@ -3,3 +3,6 @@ node_modules/
 *.log
 state/
 coverage/
+
+# Local state snapshots taken before a clean-room rehearsal. Contains .env.
+.cleanroom-backup/

@@ -57,6 +57,18 @@ docker compose "${COMPOSE_BASE[@]}" up -d --wait --wait-timeout 180 openclaw-gat
   || die "gateway did not start"
 step "gateway healthy"
 
+# Same precondition as Lab 1. Without it, a dropped Docker route surfaces as
+# "FailoverError: the provider endpoint is unreachable" attached to whatever
+# step happened to run first, which reads like a policy bug and is not one.
+# shellcheck source=scripts/lib/ollama-reach.sh
+. "$(dirname "$0")/lib/ollama-reach.sh"
+if ! ollama_reachable_from_container; then
+  printf 'STEP-FAIL: host Ollama is up but unreachable from a container\n'
+  ollama_container_hint
+  exit 1
+fi
+step "Ollama reachable from a container"
+
 # ---------------------------------------------------------------- Part 1: policy
 apply_policy lab2/policies/restrictive.json
 step "restrictive policy applied"
@@ -134,10 +146,20 @@ PYCHK
 check_context_pin || die "context window unpinned; run scripts/pin-context-window.sh"
 step "context window pinned at or below 16384"
 
-# Once pinned, `doctor --fix` must be idempotent. That is the entire point.
+# `doctor --fix` copies contextWindow into num_ctx, so it UNDOES this pin. That is
+# not a bug we can configure away: contextWindow has to stay large for the prompt
+# to fit at all (see the header of scripts/pin-context-window.sh). So the contract
+# is "re-pin after doctor --fix", and this asserts that re-pinning works, which is
+# what an attendee who runs `doctor --fix` mid-lab actually needs.
 run_cli doctor --fix >/dev/null 2>&1 || true
-check_context_pin || die "doctor --fix raised num_ctx above 16384; the pin did not hold"
-step "doctor --fix is idempotent against the pin"
+if ! check_context_pin 2>/dev/null; then
+  ./scripts/pin-context-window.sh >/dev/null 2>&1 \
+    || die "doctor --fix unpinned num_ctx and re-pinning failed"
+  check_context_pin || die "doctor --fix unpinned num_ctx and the re-pin did not take"
+  step "doctor --fix unpins num_ctx (expected); re-pinning restores it"
+else
+  step "doctor --fix left the pin alone"
+fi
 
 # A sandboxed call must actually START A CONTAINER. Asserting on `sandbox explain`
 # alone passed for weeks while every sandboxed call failed with "mounts denied",

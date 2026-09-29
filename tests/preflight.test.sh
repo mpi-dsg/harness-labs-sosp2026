@@ -39,6 +39,12 @@ case "$*" in
   "compose ps --status running --services ollama")
     if [ "${MOCK_OLLAMA_RUNNING:-0}" = 1 ]; then echo ollama; fi
     ;;
+  "image inspect "*)
+    # Absent unless the test says otherwise. The catch-all used to answer 0 here,
+    # which made preflight report "already present" and skip the pull entirely,
+    # so the pull-failure case below could never fire.
+    [ "${MOCK_IMAGE_PRESENT:-0}" = 1 ] || exit 1
+    ;;
   "pull "*)
     if [ "${MOCK_PULL_FAIL:-0}" = 1 ] && [[ "$*" == *openclaw* ]]; then
       exit 42
@@ -108,6 +114,7 @@ run_preflight() {
     PATH="$fixture/bin:$PATH" \
       MOCK_LOG="$fixture/mock.log" \
       MOCK_UNAME="${MOCK_UNAME:-Darwin}" \
+      HARNESS_SKIP_PORT_CHECK="${HARNESS_SKIP_PORT_CHECK:-1}" \
       MOCK_PULL_FAIL="${MOCK_PULL_FAIL:-0}" \
       MOCK_MODEL_PULL_FAIL="${MOCK_MODEL_PULL_FAIL:-0}" \
       MOCK_OLLAMA_SERVING="${MOCK_OLLAMA_SERVING:-1}" \
@@ -164,9 +171,61 @@ grep -Fxq 'OPENCLAW_GATEWAY_PORT=18790' "$fixture/.env" \
 [ "$(grep -c '^DOCKER_GID=' "$fixture/.env")" -eq 1 ] \
   || fail "preflight must canonicalize duplicate managed settings"
 
+# Port collision: when something already holds the gateway port, preflight must
+# move the lab rather than fail, and must not touch the process holding it.
+# Regression for a machine that had a native gateway on 18789 since the day
+# before, where `docker compose up` failed with "address already in use".
+fixture=$(make_fixture port-busy)
+# Bind an ephemeral port and tell the fixture to want THAT port. Hardcoding
+# 18789 made this test fail on any machine already running something there --
+# including the one that prompted the check in the first place.
+python3 - "$fixture" <<'PYPORT' &
+import socket, sys, time, pathlib
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", 0)); s.listen(1)
+held = s.getsockname()[1]
+base = pathlib.Path(sys.argv[1])
+(base / "held-port").write_text(str(held))
+(base / "port-held").write_text("1")
+time.sleep(25)
+PYPORT
+holder=$!
+for _ in $(seq 1 50); do [ -f "$fixture/port-held" ] && break; sleep 0.2; done
+held=$(cat "$fixture/held-port" 2>/dev/null || echo 18789)
+printf 'OPENCLAW_GATEWAY_TOKEN=%s\nDOCKER_GID=0\nOPENCLAW_GATEWAY_PORT=%s\n' \
+  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$held" > "$fixture/.env"
+HARNESS_SKIP_PORT_CHECK=0 run_preflight "$fixture" >/dev/null 2>&1 || true
+kill "$holder" 2>/dev/null || true
+wait "$holder" 2>/dev/null || true
+moved=$(awk -F= '$1 == "OPENCLAW_GATEWAY_PORT" { print $2 }' "$fixture/.env")
+[ -n "$moved" ] && [ "$moved" != "$held" ] \
+  || fail "preflight must move off a taken gateway port (held $held, got ${moved:-none})"
+
+# Idempotence: running preflight twice must not move the port. The first
+# version of the port check saw the gateway it had started itself, treated that
+# as a collision, and walked up one port per run -- 18789, 18790, 18791 -- so a
+# morning of re-runs drifted the lab off the port every command expects.
+fixture=$(make_fixture port-stable)
+printf 'OPENCLAW_GATEWAY_TOKEN=%s\nDOCKER_GID=0\nOPENCLAW_GATEWAY_PORT=18789\n' \
+  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$fixture/.env"
+run_preflight "$fixture" >/dev/null 2>&1 || true
+first=$(awk -F= '$1 == "OPENCLAW_GATEWAY_PORT" { print $2 }' "$fixture/.env")
+run_preflight "$fixture" >/dev/null 2>&1 || true
+second=$(awk -F= '$1 == "OPENCLAW_GATEWAY_PORT" { print $2 }' "$fixture/.env")
+[ "$first" = "$second" ] \
+  || fail "preflight must be idempotent on the gateway port (moved $first -> $second)"
+
 fixture=$(make_fixture pull-failure)
 if MOCK_PULL_FAIL=1 run_preflight "$fixture" >/dev/null 2>&1; then
   fail "a failed image pull must fail the preflight"
+fi
+
+# The offline half of the same contract: when the image is already cached, an
+# unreachable registry must NOT fail the preflight. This is what a conference
+# room and a rehearsal on a plane both look like.
+fixture=$(make_fixture pull-failure-but-cached)
+if ! MOCK_PULL_FAIL=1 MOCK_IMAGE_PRESENT=1 run_preflight "$fixture" >/dev/null 2>&1; then
+  fail "a cached image must survive an unreachable registry"
 fi
 
 fixture=$(make_fixture exact-model)

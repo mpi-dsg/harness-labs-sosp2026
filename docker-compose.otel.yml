@@ -8,12 +8,25 @@
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.otel.yml up -d
 #
-# Then point the exporter at Jaeger and enable the plugin (see Lab 1):
+# Then enable the plugin (see Lab 1):
 #   docker compose run --rm openclaw-cli plugins enable diagnostics-otel
-#   docker compose run --rm openclaw-cli config set diagnostics.otel.enabled true
-#   docker compose run --rm openclaw-cli config set diagnostics.otel.endpoint http://jaeger:4318
+#
+# The exporter is configured by the standard OTEL_* environment variables below,
+# not by OpenClaw config keys. The plugin ships an empty configSchema with
+# additionalProperties:false, so `config set diagnostics.otel.endpoint ...` is
+# accepted by the CLI, stored in openclaw.json, and never read by anything. The
+# symptom is that Jaeger lists only itself and no traces ever arrive.
 
 services:
+  # The exporter reads the standard OpenTelemetry environment variables. Without
+  # these the plugin loads, reports healthy, and exports nothing.
+  openclaw-gateway:
+    environment:
+      OTEL_SERVICE_NAME: openclaw-gateway
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_TRACES_EXPORTER: otlp
+
   jaeger:
     # Built locally from jaeger/Dockerfile: the digest-pinned upstream v2 release
     # with its Alpine TLS libraries (libcrypto3/libssl3) patched. Pulling upstream
